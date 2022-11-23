@@ -1,0 +1,167 @@
+---
+title: "NYPD Shooting Incidents Analysis"
+author: "Roberto Montes"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Analyzing the Effects of Month, Time of Day, and Borough on NYC Shooting Incidents
+
+The shooting incident data used in this analysis was acquired from <https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic>.
+
+Data.gov describes the data as "List of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year." This data was taken in late 2022 so the data file aggregates all NYC shooting incidents from 2006-2021.
+
+To begin, we will download the csv file directly from catalog.data.gov and transform it into a tibble using the tidyverse libraries.
+
+```{r import_data}
+library(tidyverse)
+library(lubridate)
+shooting_incidents <- read_csv('https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD')
+```
+
+## Tidy & Transform Data
+
+Next, we clean the data by removing erroneous columns and transforming character and date columns to their appropriate factor and data data types.
+
+There are missing values related to perpetrators likely due to perpetrators being unknown. This information is not relevant to our analysis investigating the relationship between borough, season, and time of day to number of shooting incidents. If our analysis directly dealt with perpetrator information we would need to consider whether we could safely remove rows with missing values without affecting our analysis.
+
+
+```{r tidy_data}
+shooting_incidents <- shooting_incidents %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  mutate_at("BORO", factor) %>%
+  select(c('OCCUR_DATE', 'OCCUR_TIME', 'BORO'))
+ 
+
+summary(shooting_incidents)
+```
+
+
+## Visualizing Data
+
+Firstly, let us take a look at the number of shooting incidents by date from 2006 to 2021 and see what we can glean.
+
+```{r visualizing_data_allyears}
+by_date <- shooting_incidents %>%
+     group_by(OCCUR_DATE) %>%
+     count(name = "NUM_INCIDENTS")
+
+ by_date %>%    
+    ggplot(aes(x=OCCUR_DATE, y=NUM_INCIDENTS)) +
+    geom_line() +
+    labs(title = "NYC Shooting Incidents by Date") +
+    xlab("Date") + 
+   ylab("Number of Incidents")
+
+ #determine the maximum number of incidents in a single day
+by_date %>%
+     filter(NUM_INCIDENTS == max(by_date$NUM_INCIDENTS))
+```
+
+At a glance it looks like there is a repeating hill pattern with a rise and fall shooting incidents over the years. We can also see an outlier spike of shooting incidents in July of 2020.
+
+It might be useful to look at the number of shooting incidents by month to see if there is clearer support for this pattern.
+
+```{r visualizing_data_bymonth}
+
+shooting_incidents %>%
+ggplot(aes(x = factor(month(OCCUR_DATE)))) +
+geom_bar() +
+labs(title = "Number of NYC Shooting Incidents by Month") +
+xlab("Month") +
+ylab("Num Incidents")
+
+by_date %>%
+  group_by(month = month(OCCUR_DATE)) %>%
+  summarize(mean = mean(NUM_INCIDENTS)) %>%
+  ggplot(aes(x = month, y = mean)) +
+  geom_line() +
+  labs(title = "Average Daily NYC Shooting Incidents") +
+  xlab("Month") +
+  ylab("Average Num Incidents")
+
+```
+
+We can see a slight increase of incidents in the Summer months which lends some credence to the truism that violent crime rises during hotter weather.
+
+We can also see if there is any relationship between time of day and the number of shooting incidents by splitting the day intwo 4 categories, EARLYMORNING (Midnight-6am), MORNING (6am-12pm), AFTERNOON (12pm-6pm), and EVENING (6pm-midnight).
+
+We can visualize the relationship between the time of day and borough using the code below to generate a boxplot.
+
+```{r modeling_data}
+
+by_time <- shooting_incidents %>%
+          mutate(HOUR = hour(OCCUR_TIME)) %>%
+          select(OCCUR_DATE, OCCUR_TIME, BORO, HOUR) %>%
+          mutate(TIME_OF_DAY = case_when(HOUR >= 0 & HOUR < 6 ~ 'EARLYMORNING',
+                                           HOUR >= 6 & HOUR < 12 ~ 'MORNING',
+                                           HOUR >= 12 & HOUR < 18 ~ 'AFTERNOON',
+                                           HOUR >= 18 & HOUR < 24 ~ 'EVENING')) %>%
+     
+          select(-c(HOUR)) %>%
+          mutate_at("TIME_OF_DAY", factor)
+
+
+grouped_time <- by_time %>%
+                group_by(BORO, YEAR = year(OCCUR_DATE), MONTH = month(OCCUR_DATE), TIME_OF_DAY) %>%
+                count(name = "NUM_INCIDENTS") %>%
+                mutate_at(c("YEAR", "MONTH"), factor) %>%
+                ungroup()
+
+
+grouped_time %>%
+         ggplot(aes(x = TIME_OF_DAY, y = NUM_INCIDENTS)) +
+         geom_boxplot(outlier.colour="red") +
+         ylim(0,50) +
+         labs(title= "Number of Shooting Incidents by Time of Day") +
+         xlab("Time of Day") +
+         ylab("Number of Shooting Incidents") +
+         coord_flip()
+     
+
+```
+
+(Note that we have truncated the x-axis down to 50 for readability; this removes some additional outliers)
+
+The outliers are colored red for convenience. Looking at the above graph we can see that there appears to be a distinction among number of shooting incidents by time. In particular, the mean of evening and early morning are greater than those of morning and afternoon. There is also a greater spread in the evening and early morning compared to the morning hours.
+
+
+### Modeling Data
+
+We can learn more about the relationship between time of day and the number of shooting incidents by applying a linear regression.
+
+```{r modeling_time_of_day}
+
+time_model <- grouped_time %>%
+     lm(NUM_INCIDENTS ~ TIME_OF_DAY,data = .)
+
+summary(time_model)
+
+```
+
+From the above we can see that there appears to be a statistically significant relationship between time of day and number of shooting incidents as the p-value is very small. The Adjusted R-Squared value implies that time of day is not enough information to fully explain the data we have here.
+
+If we include borough as another dimension in our regression analysis we can see that the Adjusted R-Squared value increases to .4243, a marked improvement.
+
+```{r including_borough}
+
+time_boro_model <- grouped_time %>%
+    lm(NUM_INCIDENTS ~ TIME_OF_DAY + BORO, data = .)
+
+summary(time_boro_model)
+```
+
+## Biases
+
+It is important to acknowledge that the data used in the above analysis comes from the NYPD and so any potential bias inherent in that organization might affect our results. Shooting incident data is also biased toward incidents the NYPD would report; areas neglected by NYPD may have incidents that do not appear in our data set. As stated on the city of New York website, the Office of Management Analysis and Planning review the information before posting it which is one way to mitigate potential biases. I must also acknowledge my own bias as someone who is a current NYC resident as the local news I consume might affect my view of where and when shooting incidents occur.
+
+
+### Session Info
+```{r session_info, echo=TRUE}
+sessionInfo()
